@@ -21,6 +21,13 @@ def load_data(file_path):
     data['SMA'] = talib.SMA(data['close'], timeperiod=14)
     data['EMA'] = talib.EMA(data['close'], timeperiod=14)
     data['RSI'] = talib.RSI(data['close'], timeperiod=14)
+    data['MACD'], data['MACD_signal'], data['MACD_hist'] = talib.MACD(data['close'])
+    data['Upper_BB'], data['Middle_BB'], data['Lower_BB'] = talib.BBANDS(data['close'])
+
+    # Add lag features
+    for lag in range(1, 11):
+        data[f'lag_{lag}'] = data['Return'].shift(lag)
+    
     data.dropna(inplace=True)
     
     # Drop non-numeric columns
@@ -36,7 +43,7 @@ def create_dataset(data, look_back=1):
         Y.append(data[i + look_back, 0])  # Assume 'Return' is the first column
     return np.array(X), np.array(Y)
 
-data = load_data('data/my_dataframe_100.csv')
+data = load_data('data/my_dataframe_1000.csv')
 target_column = 'Return'
 features = data.drop(columns=[target_column]).values
 targets = data[target_column].values
@@ -66,41 +73,44 @@ train_size = int(0.8 * len(dataset))
 val_size = len(dataset) - train_size
 train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-batch_size = 32
+# Experiment with different batch sizes
+batch_size = 64
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-# Define a deeper neural network with dropout and L2 regularization
-class DeepNN(nn.Module):
-    def __init__(self, input_size, hidden_size1, hidden_size2, output_size):
-        super(DeepNN, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size1)
-        self.relu1 = nn.ReLU()
-        self.dropout1 = nn.Dropout(0.2)
-        self.fc2 = nn.Linear(hidden_size1, hidden_size2)
-        self.relu2 = nn.ReLU()
-        self.dropout2 = nn.Dropout(0.2)
-        self.fc3 = nn.Linear(hidden_size2, output_size)
+# Define an LSTM network
+class LSTMNN(nn.Module):
+    def __init__(self, input_size, hidden_size, num_layers, output_size):
+        super(LSTMNN, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.3)
+        self.dropout = nn.Dropout(0.3)
+        self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_size // 2, output_size)
 
     def forward(self, x):
-        out = self.fc1(x)
-        out = self.relu1(out)
-        out = self.dropout1(out)
+        h_0 = torch.zeros(num_layers, x.size(0), hidden_size).to(x.device)
+        c_0 = torch.zeros(num_layers, x.size(0), hidden_size).to(x.device)
+        out, _ = self.lstm(x, (h_0, c_0))
+        out = self.dropout(out[:, -1, :])
+        out = self.fc1(out)
+        out = self.relu(out)
+        out = self.dropout(out)
         out = self.fc2(out)
-        out = self.relu2(out)
-        out = self.dropout2(out)
-        out = self.fc3(out)
         return out
 
 input_size = X.shape[2]  # Number of features
-hidden_size1 = 100
-hidden_size2 = 50
+hidden_size = 100
+num_layers = 2
 output_size = 1
-model = DeepNN(input_size, hidden_size1, hidden_size2, output_size)
+model = LSTMNN(input_size, hidden_size, num_layers, output_size)
+
+# Experiment with different learning rates
+learning_rate = 0.0005
 
 # Loss and optimizer
 loss_fn = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)  # L2 regularization
+optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)  # L2 regularization
 scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
 # Training loop with early stopping and validation
@@ -114,7 +124,7 @@ for epoch in range(num_epochs):
     train_loss = 0
     for i, (inputs, targets) in enumerate(train_loader):
         # Forward pass
-        outputs = model(inputs[:, -1, :])  # Use the last timestep for prediction
+        outputs = model(inputs)
         
         # Ensure targets shape matches outputs shape
         targets = targets.view_as(outputs)
@@ -132,7 +142,7 @@ for epoch in range(num_epochs):
     val_loss = 0
     with torch.no_grad():
         for inputs, targets in val_loader:
-            outputs = model(inputs[:, -1, :])
+            outputs = model(inputs)
             targets = targets.view_as(outputs)
             loss = loss_fn(outputs, targets)
             val_loss += loss.item()
