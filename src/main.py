@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, random_split
 import pandas as pd
 import numpy as np
 import logging
@@ -60,12 +60,17 @@ Y_tensor = torch.tensor(Y, dtype=torch.float32).view(-1, 1)
 print(f"Shape of X_tensor: {X_tensor.shape}")
 print(f"Shape of Y_tensor: {Y_tensor.shape}")
 
-# Create DataLoader
-batch_size = 32
+# Create DataLoader with train and validation split
 dataset = TensorDataset(X_tensor, Y_tensor)
-dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+train_size = int(0.8 * len(dataset))
+val_size = len(dataset) - train_size
+train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
 
-# Define a deeper neural network with dropout
+batch_size = 32
+train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+
+# Define a deeper neural network with dropout and L2 regularization
 class DeepNN(nn.Module):
     def __init__(self, input_size, hidden_size1, hidden_size2, output_size):
         super(DeepNN, self).__init__()
@@ -95,18 +100,19 @@ model = DeepNN(input_size, hidden_size1, hidden_size2, output_size)
 
 # Loss and optimizer
 loss_fn = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=0.001)
+optimizer = optim.Adam(model.parameters(), lr=0.001, weight_decay=1e-5)  # L2 regularization
 scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
 
-# Training loop with early stopping
+# Training loop with early stopping and validation
 num_epochs = 50
 patience = 5
 best_loss = float('inf')
 epochs_no_improve = 0
 
 for epoch in range(num_epochs):
-    epoch_loss = 0
-    for i, (inputs, targets) in enumerate(dataloader):
+    model.train()
+    train_loss = 0
+    for i, (inputs, targets) in enumerate(train_loader):
         # Forward pass
         outputs = model(inputs[:, -1, :])  # Use the last timestep for prediction
         
@@ -120,18 +126,27 @@ for epoch in range(num_epochs):
         loss.backward()
         optimizer.step()
         
-        epoch_loss += loss.item()
-        
-        if (i+1) % 10 == 0:
-            logging.info(f'Epoch [{epoch+1}/{num_epochs}], Step [{i+1}/{len(dataloader)}], Loss: {loss.item():.4f}')
+        train_loss += loss.item()
+    
+    model.eval()
+    val_loss = 0
+    with torch.no_grad():
+        for inputs, targets in val_loader:
+            outputs = model(inputs[:, -1, :])
+            targets = targets.view_as(outputs)
+            loss = loss_fn(outputs, targets)
+            val_loss += loss.item()
+    
+    train_loss /= len(train_loader)
+    val_loss /= len(val_loader)
+    
+    logging.info(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
     
     scheduler.step()
-    avg_epoch_loss = epoch_loss / len(dataloader)
-    logging.info(f'Epoch [{epoch+1}/{num_epochs}], Average Loss: {avg_epoch_loss:.4f}')
     
     # Early stopping
-    if avg_epoch_loss < best_loss:
-        best_loss = avg_epoch_loss
+    if val_loss < best_loss:
+        best_loss = val_loss
         epochs_no_improve = 0
     else:
         epochs_no_improve += 1
