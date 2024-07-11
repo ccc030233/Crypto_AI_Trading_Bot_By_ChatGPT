@@ -7,6 +7,7 @@ import numpy as np
 import logging
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import KFold
+import itertools
 import talib
 
 # Set up logging
@@ -72,95 +73,112 @@ print(f"Shape of Y_tensor: {Y_tensor.shape}")
 k_folds = 5
 kfold = KFold(n_splits=k_folds, shuffle=True)
 
-# Define your model, loss function, and optimizer
-input_size = X.shape[2]
-hidden_size = 100
-num_layers = 2
+# Define parameter grid
+param_grid = {
+    'hidden_size': [50, 100, 200],
+    'num_layers': [1, 2, 3],
+    'dropout': [0.2, 0.3, 0.4],
+    'learning_rate': [0.001, 0.0005, 0.0001],
+    'batch_size': [32, 64, 128]
+}
+
+# Generate all combinations of parameters
+param_combinations = list(itertools.product(*param_grid.values()))
+
+best_val_loss = float('inf')
+best_params = None
+
+# k-fold cross-validation with grid search
+input_size = X.shape[2]  # Number of features
 output_size = 1
-batch_size = 64
-learning_rate = 0.0005
 
-# k-fold cross-validation
-for fold, (train_ids, val_ids) in enumerate(kfold.split(X_tensor)):
-    print(f'Fold {fold}')
+for params in param_combinations:
+    hidden_size, num_layers, dropout, learning_rate, batch_size = params
+    print(f"Evaluating combination: hidden_size={hidden_size}, num_layers={num_layers}, dropout={dropout}, learning_rate={learning_rate}, batch_size={batch_size}")
     
-    # Sample elements randomly from a given list of ids, no replacement
-    train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
-    val_subsampler = torch.utils.data.SubsetRandomSampler(val_ids)
-    
-    # Define data loaders for training and validation
-    train_loader = DataLoader(TensorDataset(X_tensor, Y_tensor), batch_size=batch_size, sampler=train_subsampler)
-    val_loader = DataLoader(TensorDataset(X_tensor, Y_tensor), batch_size=batch_size, sampler=val_subsampler)
-    
-    # Define an LSTM network
-    class LSTMNN(nn.Module):
-        def __init__(self, input_size, hidden_size, num_layers, output_size):
-            super(LSTMNN, self).__init__()
-            self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=0.3)
-            self.dropout = nn.Dropout(0.3)
-            self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
-            self.relu = nn.ReLU()
-            self.fc2 = nn.Linear(hidden_size // 2, output_size)
+    fold_val_losses = []
 
-        def forward(self, x):
-            h_0 = torch.zeros(num_layers, x.size(0), hidden_size).to(x.device)
-            c_0 = torch.zeros(num_layers, x.size(0), hidden_size).to(x.device)
-            out, _ = self.lstm(x, (h_0, c_0))
-            out = self.dropout(out[:, -1, :])
-            out = self.fc1(out)
-            out = self.relu(out)
-            out = self.dropout(out)
-            out = self.fc2(out)
-            return out
-
-    model = LSTMNN(input_size, hidden_size, num_layers, output_size)
-    
-    # Loss and optimizer
-    loss_fn = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
-    
-    # Training loop with early stopping and validation
-    num_epochs = 50
-    patience = 5
-    best_loss = float('inf')
-    epochs_no_improve = 0
-    
-    for epoch in range(num_epochs):
-        model.train()
-        train_loss = 0
-        for i, (inputs, targets) in enumerate(train_loader):
-            outputs = model(inputs)
-            targets = targets.view_as(outputs)
-            loss = loss_fn(outputs, targets)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            train_loss += loss.item()
+    for fold, (train_ids, val_ids) in enumerate(kfold.split(X_tensor)):
+        print(f'Fold {fold}')
         
-        model.eval()
-        val_loss = 0
-        with torch.no_grad():
-            for inputs, targets in val_loader:
+        train_subsampler = torch.utils.data.SubsetRandomSampler(train_ids)
+        val_subsampler = torch.utils.data.SubsetRandomSampler(val_ids)
+        
+        train_loader = DataLoader(TensorDataset(X_tensor, Y_tensor), batch_size=batch_size, sampler=train_subsampler)
+        val_loader = DataLoader(TensorDataset(X_tensor, Y_tensor), batch_size=batch_size, sampler=val_subsampler)
+        
+        class LSTMNN(nn.Module):
+            def __init__(self, input_size, hidden_size, num_layers, output_size):
+                super(LSTMNN, self).__init__()
+                self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True, dropout=dropout)
+                self.dropout = nn.Dropout(dropout)
+                self.fc1 = nn.Linear(hidden_size, hidden_size // 2)
+                self.relu = nn.ReLU()
+                self.fc2 = nn.Linear(hidden_size // 2, output_size)
+
+            def forward(self, x):
+                h_0 = torch.zeros(num_layers, x.size(0), hidden_size).to(x.device)
+                c_0 = torch.zeros(num_layers, x.size(0), hidden_size).to(x.device)
+                out, _ = self.lstm(x, (h_0, c_0))
+                out = self.dropout(out[:, -1, :])
+                out = self.fc1(out)
+                out = self.relu(out)
+                out = self.dropout(out)
+                out = self.fc2(out)
+                return out
+
+        model = LSTMNN(input_size, hidden_size, num_layers, output_size)
+        loss_fn = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=1e-5)
+        scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=10, gamma=0.1)
+        
+        num_epochs = 50
+        patience = 5
+        best_loss = float('inf')
+        epochs_no_improve = 0
+        
+        for epoch in range(num_epochs):
+            model.train()
+            train_loss = 0
+            for i, (inputs, targets) in enumerate(train_loader):
                 outputs = model(inputs)
                 targets = targets.view_as(outputs)
                 loss = loss_fn(outputs, targets)
-                val_loss += loss.item()
-        
-        train_loss /= len(train_loader)
-        val_loss /= len(val_loader)
-        
-        logging.info(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
-        
-        scheduler.step()
-        
-        if val_loss < best_loss:
-            best_loss = val_loss
-            epochs_no_improve = 0
-        else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience:
-                logging.info('Early stopping!')
-                break
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                train_loss += loss.item()
+            
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for inputs, targets in val_loader:
+                    outputs = model(inputs)
+                    targets = targets.view_as(outputs)
+                    loss = loss_fn(outputs, targets)
+                    val_loss += loss.item()
+            
+            train_loss /= len(train_loader)
+            val_loss /= len(val_loader)
+            
+            logging.info(f'Epoch [{epoch+1}/{num_epochs}], Train Loss: {train_loss:.4f}, Validation Loss: {val_loss:.4f}')
+            
+            scheduler.step()
+            
+            if val_loss < best_loss:
+                best_loss = val_loss
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    logging.info('Early stopping!')
+                    break
 
-print("k-Fold Cross Validation complete.")
+        fold_val_losses.append(best_loss)
+
+    avg_val_loss = sum(fold_val_losses) / k_folds
+    if avg_val_loss < best_val_loss:
+        best_val_loss = avg_val_loss
+        best_params = params
+
+print(f"Best params: {best_params}, Best validation loss: {best_val_loss}")
